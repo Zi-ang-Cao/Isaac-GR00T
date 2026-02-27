@@ -772,6 +772,68 @@ class AgibotGenie1DataConfig(BaseDataConfig):
 
 ###########################################################################################
 
+
+class UnitreeG1SonicLatentDataConfig(BaseDataConfig):
+    """Data config for Unitree G1 whole body teleop with latent actions (SONIC).
+
+    Uses latent motion_token + hand joints as action space, with a 50-step
+    action horizon.  State includes full body joints and projected gravity.
+    max_action_dim is set to 128 to match the pretrained checkpoint.
+    """
+
+    video_keys = ["video.ego_view"]
+    state_keys = [
+        "state.left_leg",
+        "state.right_leg",
+        "state.waist",
+        "state.left_arm",
+        "state.right_arm",
+        "state.left_hand",
+        "state.right_hand",
+        "state.projected_gravity",
+    ]
+    action_keys = [
+        "action.motion_token",
+        "action.left_hand_joints",
+        "action.right_hand_joints",
+    ]
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [0]
+    action_indices = list(range(50))
+
+    def transform(self) -> ModalityTransform:
+        transforms = [
+            VideoToTensor(apply_to=self.video_keys),
+            VideoCrop(apply_to=self.video_keys, scale=0.95),
+            VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
+            VideoToNumpy(apply_to=self.video_keys),
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={key: "min_max" for key in self.state_keys},
+            ),
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={key: "min_max" for key in self.action_keys},
+            ),
+            ConcatTransform(
+                video_concat_order=self.video_keys,
+                state_concat_order=self.state_keys,
+                action_concat_order=self.action_keys,
+            ),
+            GR00TTransform(
+                state_horizon=len(self.observation_indices),
+                action_horizon=len(self.action_indices),
+                max_state_dim=64,
+                max_action_dim=128,
+            ),
+        ]
+        return ComposedModalityTransform(transforms=transforms)
+
+
+###########################################################################################
+
 DATA_CONFIG_MAP = {
     "fourier_gr1_arms_waist": FourierGr1ArmsWaistDataConfig(),
     "fourier_gr1_arms_only": FourierGr1ArmsOnlyDataConfig(),
@@ -785,4 +847,5 @@ DATA_CONFIG_MAP = {
     "unitree_g1_full_body": UnitreeG1FullBodyDataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
     "agibot_genie1": AgibotGenie1DataConfig(),
+    "unitree_g1_sonic_latent": UnitreeG1SonicLatentDataConfig(),
 }

@@ -37,6 +37,11 @@ class EmbodimentTag(Enum):
     Any new embodiment for finetuning.
     """
 
+    UNITREE_G1_WHOLE_BODY_TELEOP_LATENT = "unitree_g1_whole_body_teleop_latent"
+    """
+    The Unitree G1 dataset with whole body teleop and latent actions (SONIC).
+    """
+
 
 # Embodiment tag string: to projector index in the Action Expert Module
 EMBODIMENT_TAG_MAPPING = {
@@ -44,4 +49,5 @@ EMBODIMENT_TAG_MAPPING = {
     EmbodimentTag.OXE_DROID.value: 17,
     EmbodimentTag.AGIBOT_GENIE1.value: 26,
     EmbodimentTag.GR1.value: 24,
+    EmbodimentTag.UNITREE_G1_WHOLE_BODY_TELEOP_LATENT.value: 9,
 }

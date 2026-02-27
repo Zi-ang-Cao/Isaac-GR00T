@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Tuple
 
 import numpy as np
@@ -220,6 +222,16 @@ class GR00T_N1_5(PreTrainedModel):
                 f"Model not found or avail in the huggingface hub. Loading from local path: {pretrained_model_name_or_path}"
             )
             local_model_path = pretrained_model_name_or_path
+
+        # If the checkpoint was prepared with convert_sonic_checkpoint.py --prepare,
+        # a sidecar config_public.json exists alongside the original config.json.
+        # Use it so internal checkpoints load without modifying their config.json.
+        public_cfg_path = Path(local_model_path) / "config_public.json"
+        if public_cfg_path.exists() and "config" not in kwargs:
+            print(f"Found {public_cfg_path.name} -- using public config format")
+            with open(public_cfg_path) as f:
+                public_cfg_dict = json.load(f)
+            kwargs["config"] = GR00T_N1_5_Config(**public_cfg_dict)
 
         pretrained_model = super().from_pretrained(
             local_model_path, local_model_path=local_model_path, **kwargs
