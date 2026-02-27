@@ -14,7 +14,7 @@ class Gr00tN1d6Config(PretrainedConfig):
     """Unified configuration for Gr00tN1d6 model with backbone and action head."""
 
     # Model identification
-    model_type: str = "Gr00tN1d6"
+    model_type: str = "GrootN1d6"
     model_dtype: str = "bfloat16"  # Use bfloat16 for Flash Attention compatibility
 
     # backbone configuration

@@ -54,6 +54,11 @@ class EmbodimentTag(Enum):
     The Behavior R1 Pro robot.
     """
 
+    XDOF = "xdof"
+    """
+    The XDOF bimanual robot.
+    """
+
     # New embodiment during post-training
     NEW_EMBODIMENT = "new_embodiment"
     """

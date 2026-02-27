@@ -523,4 +523,8 @@ class Gr00tN1d6Processor(BaseProcessor):
         return cls(**processor_kwargs, transformers_loading_kwargs=transformers_loading_kwargs)
 
 
-AutoProcessor.register("Gr00tN1d6", Gr00tN1d6Processor)
+# Register by config class so AutoProcessor.from_pretrained() can resolve
+# the processor via the config mapping (not just by name string).
+from gr00t.configs.model.gr00t_n1d6 import Gr00tN1d6Config
+
+AutoProcessor.register(Gr00tN1d6Config, Gr00tN1d6Processor)

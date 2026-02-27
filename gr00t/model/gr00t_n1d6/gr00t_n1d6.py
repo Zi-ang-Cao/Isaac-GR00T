@@ -534,6 +534,8 @@ class Gr00tN1d6(PreTrainedModel):
         return next(iter(self.parameters())).dtype
 
 
-# Register the model with HuggingFace
-AutoConfig.register("Gr00tN1d6", Gr00tN1d6Config)
+# Register the model with HuggingFace.
+# The key must be "GrootN1d6" (letter 'o'), matching the model_type in
+# checkpoint config.json files produced by the training pipeline.
+AutoConfig.register("GrootN1d6", Gr00tN1d6Config)
 AutoModel.register(Gr00tN1d6Config, Gr00tN1d6)

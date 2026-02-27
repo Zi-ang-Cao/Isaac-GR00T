@@ -1,3 +1,4 @@
+import dataclasses
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
@@ -278,6 +279,9 @@ def to_json_serializable(obj: Any) -> Any:
         return str(obj)
 
 
+_MODALITY_CONFIG_FIELDS = {f.name for f in dataclasses.fields(ModalityConfig)}
+
+
 def parse_modality_configs(
     modality_configs: dict[str, dict[str, ModalityConfig]],
 ) -> dict[str, dict[str, ModalityConfig]]:
@@ -286,7 +290,8 @@ def parse_modality_configs(
         parsed_modality_configs[embodiment_tag] = {}
         for modality, config in modality_config.items():
             if isinstance(config, dict):
-                parsed_modality_configs[embodiment_tag][modality] = ModalityConfig(**config)
+                filtered = {k: v for k, v in config.items() if k in _MODALITY_CONFIG_FIELDS}
+                parsed_modality_configs[embodiment_tag][modality] = ModalityConfig(**filtered)
             else:
                 parsed_modality_configs[embodiment_tag][modality] = config
     return parsed_modality_configs

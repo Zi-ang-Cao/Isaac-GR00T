@@ -3,11 +3,13 @@
 This module provides the core policy classes for running Gr00t models:
 - Gr00tPolicy: Base policy class for model inference
 - Gr00tSimPolicyWrapper: Wrapper for compatibility with existing Gr00t simulation environments
+- Gr00tRealRobotPolicyWrapper: Wrapper for real robot deployment with serialized video
 """
 
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import torch
 from transformers import AutoModel, AutoProcessor
@@ -63,6 +65,9 @@ class Gr00tPolicy(BasePolicy):
         *,
         device: int | str,
         strict: bool = True,
+        num_inference_timesteps: int | None = None,
+        use_torch_compile: bool = False,
+        torch_compile_mode: str = "reduce-overhead",
     ):
         """Initialize the Gr00t Policy.
 
@@ -71,6 +76,9 @@ class Gr00tPolicy(BasePolicy):
             model_path: Path to the pretrained model checkpoint directory
             device: Device to run the model on (e.g., 'cuda:0', 0, 'cpu')
             strict: Whether to enforce strict input validation (default: True)
+            num_inference_timesteps: Override number of denoising steps (None = model default)
+            use_torch_compile: Whether to torch.compile the action head's get_action method
+            torch_compile_mode: torch.compile mode ("default", "reduce-overhead", "max-autotune")
         """
         # Import this to register all models.
         import gr00t.model  # noqa: F401
@@ -84,14 +92,30 @@ class Gr00tPolicy(BasePolicy):
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model
 
-        # Load the processor for input/output transformation
-        self.processor: BaseProcessor = AutoProcessor.from_pretrained(model_dir)
+        # Load the processor for input/output transformation.
+        # Resolve processor class via PROCESSOR_MAPPING (AutoProcessor.from_pretrained
+        # fails on custom models because it tries name-based lookup before the mapping).
+        from transformers.models.auto.processing_auto import PROCESSOR_MAPPING
+
+        processor_class = PROCESSOR_MAPPING[type(self.model.config)]
+        self.processor: BaseProcessor = processor_class.from_pretrained(model_dir)
         self.processor.eval()
 
         # Store embodiment-specific configurations
         self.embodiment_tag = embodiment_tag
         self.modality_configs = self.processor.get_modality_configs()[self.embodiment_tag.value]
         self.collate_fn = self.processor.collator
+
+        action_head = self.model.action_head
+
+        if num_inference_timesteps is None:
+            print(
+                f"Using default num_inference_timesteps from model config: "
+                f"{action_head.num_inference_timesteps}"
+            )
+        else:
+            print(f"Using num_inference_timesteps from init args: {num_inference_timesteps}")
+            action_head.num_inference_timesteps = num_inference_timesteps
 
         # Extract and validate language configuration
         # Currently only supports single language input per timestep
@@ -100,6 +124,31 @@ class Gr00tPolicy(BasePolicy):
         assert len(language_keys) == 1, "Only one language key is supported"
         assert len(language_delta_indices) == 1, "Only one language delta index is supported"
         self.language_key = language_keys[0]
+
+        if use_torch_compile and action_head is not None:
+            print(
+                f"[Gr00tPolicy] Applying torch.compile (mode={torch_compile_mode}) "
+                f"to action head..."
+            )
+            try:
+                from torch._inductor import config as inductor_config
+
+                inductor_config.fx_graph_cache = True
+                inductor_config.fx_graph_remote_cache = False
+                print("[Gr00tPolicy] Inductor FX graph cache enabled")
+            except Exception as e:
+                print(f"[Gr00tPolicy] WARNING: Could not enable inductor cache: {e}")
+
+            try:
+                action_head.get_action = torch.compile(
+                    action_head.get_action,
+                    mode=torch_compile_mode,
+                    fullgraph=False,
+                    dynamic=True,
+                )
+                print("[Gr00tPolicy] torch.compile applied to action head.")
+            except Exception as e:
+                print(f"[Gr00tPolicy] torch.compile failed: {e}. Continuing without it.")
 
     def _unbatch_observation(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         """Unbatch a batched observation into a list of single observations.
@@ -670,4 +719,164 @@ class Gr00tSimPolicyWrapper(PolicyWrapper):
         Returns:
             Dictionary mapping modality names to their configurations
         """
+        return self.policy.get_modality_config()
+
+
+def _check_video_is_batched(video: np.ndarray) -> bool:
+    """Check if the video is batched by examining array dimensions.
+
+    For serialized videos (dtype=object):
+       - Batched: (B, T) - 2D array of bytes
+       - Individual: (T,) - 1D array of bytes
+
+    For non-serialized videos (numeric dtype):
+       - Batched: (B, T, H, W, C) - 5D array
+       - Individual: (T, H, W, C) - 4D array
+    """
+    if len(video) == 0:
+        return False
+    if video.dtype == np.object_:
+        return video.ndim == 2
+    return video.ndim == 5
+
+
+class Gr00tRealRobotPolicyWrapper(PolicyWrapper):
+    """Wrapper for Gr00tPolicy enabling real robot deployment with serialized video.
+
+    This wrapper handles the transformation between the flat observation format
+    used by real robot clients (with serialized JPEG video data sent over ZMQ)
+    and the nested format expected by Gr00tPolicy.
+
+    Key transformations:
+    - Video decoding: JPEG bytes list -> decoded RGB arrays (T, H, W, C)
+    - Flat-to-nested obs: 'video.cam' -> observation['video']['cam']
+    - Flat-to-nested obs: 'state.joints' -> observation['state']['joints']
+    - Language: 'annotation.task' -> observation['language']['annotation.task']
+    - Batch dim: adds (B=1) for unbatched inputs, removes it from outputs
+    - Action: action['joints'] -> 'action.joints' with batch dim removed
+    """
+
+    def __init__(self, policy: Gr00tPolicy, *, strict: bool = True):
+        super().__init__(policy, strict=strict)
+        self.policy: Gr00tPolicy = policy
+        assert len(self.policy.modality_configs["language"].delta_indices) == 1, (
+            "Only one language delta index is supported"
+        )
+
+    def check_observation(self, observation: dict[str, Any]) -> None:
+        modality_configs = self.get_modality_config()
+
+        for video_key in modality_configs["video"].modality_keys:
+            parsed_key = f"video.{video_key}"
+            assert parsed_key in observation, f"Video key '{parsed_key}' must be in observation"
+            assert isinstance(observation[parsed_key], list), (
+                f"Video key '{video_key}' must be a list. Got {type(observation[parsed_key])}"
+            )
+
+        for state_key in modality_configs["state"].modality_keys:
+            parsed_key = f"state.{state_key}"
+            assert parsed_key in observation, f"State key '{parsed_key}' must be in observation"
+            batched_state = observation[parsed_key]
+            assert isinstance(batched_state, np.ndarray), (
+                f"State key '{state_key}' must be a numpy array. Got {type(batched_state)}"
+            )
+            assert batched_state.dtype == np.float32, (
+                f"State key '{state_key}' must be float32. Got {batched_state.dtype}"
+            )
+            assert batched_state.ndim in [2, 3], (
+                f"State key '{state_key}' must be (T, D) or (B, T, D), got {batched_state.ndim}D"
+            )
+
+        for language_key in modality_configs["language"].modality_keys:
+            assert language_key in observation, (
+                f"Language key '{language_key}' must be in observation"
+            )
+            assert isinstance(observation[language_key], (tuple, list)), (
+                f"Language key '{language_key}' must be tuple or list. "
+                f"Got {type(observation[language_key])}"
+            )
+
+    def _decode_video(self, video_list: list) -> np.ndarray:
+        """Decode a list of JPEG-encoded bytes to an RGB numpy array.
+
+        Args:
+            video_list: List of JPEG bytes, either [bytes, ...] for (T,) or
+                        [[bytes, ...], ...] for (B, T).
+
+        Returns:
+            Decoded array as uint8 with shape (T, H, W, C) or (B, T, H, W, C).
+        """
+        video_array = np.array(video_list)
+        is_batched = _check_video_is_batched(video_array)
+
+        if is_batched:
+            decoded_frames = []
+            for batch in video_array:
+                batch_frames = [
+                    cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
+                    for frame in batch
+                ]
+                decoded_frames.append(batch_frames)
+            return np.array(decoded_frames, dtype=np.uint8)
+        else:
+            decoded_frames = [
+                cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
+                for frame in video_array
+            ]
+            return np.array(decoded_frames, dtype=np.uint8)
+
+    def _maybe_add_batch_dim(self, arr: Any) -> Any:
+        """Add batch dimension if the input is unbatched."""
+        if isinstance(arr, (tuple, list)) and isinstance(arr[0], str):
+            return [arr]
+        if isinstance(arr, np.ndarray):
+            if arr.ndim == 4:  # video (T, H, W, C) -> (1, T, H, W, C)
+                return np.expand_dims(arr, axis=0)
+            elif arr.ndim == 2:  # state (T, D) -> (1, T, D)
+                return np.expand_dims(arr, axis=0)
+        return arr
+
+    def _get_action(
+        self, observation: dict[str, Any], options: dict[str, Any] | None = None
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        modality_configs = self.get_modality_config()
+
+        new_obs: dict[str, dict[str, Any]] = {}
+        for modality in ["video", "state", "language"]:
+            new_obs[modality] = {}
+            for key in modality_configs[modality].modality_keys:
+                parsed_key = f"{modality}.{key}"
+                if modality == "language":
+                    parsed_key = parsed_key.replace("language.", "")
+
+                arr = observation[parsed_key]
+
+                if modality == "video":
+                    arr = self._decode_video(arr)
+
+                arr = self._maybe_add_batch_dim(arr)
+                new_obs[modality][key] = arr
+
+        action, info = self.policy.get_action(new_obs, options)
+
+        # Flatten action keys and remove the batch dimension
+        return {f"action.{key}": action[key][0] for key in action}, info
+
+    def check_action(self, action: dict[str, Any]) -> None:
+        modality_configs = self.get_modality_config()
+        for action_key in modality_configs["action"].modality_keys:
+            parsed_key = f"action.{action_key}"
+            assert parsed_key in action, f"Action key '{parsed_key}' must be in action"
+            action_arr = action[parsed_key]
+            assert isinstance(action_arr, np.ndarray), (
+                f"Action key '{action_key}' must be a numpy array. Got {type(action_arr)}"
+            )
+            assert action_arr.dtype == np.float32, (
+                f"Action key '{action_key}' must be float32. Got {action_arr.dtype}"
+            )
+            assert action_arr.ndim in [2, 3], (
+                f"Action key '{action_key}' must be (T, D) or (B, T, D), got {action_arr.ndim}D"
+            )
+
+    def get_modality_config(self) -> dict[str, ModalityConfig]:
         return self.policy.get_modality_config()

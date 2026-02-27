@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import json
 import os
+from typing import Literal
 
 from gr00t.data.embodiment_tags import EmbodimentTag
 from gr00t.policy.gr00t_policy import Gr00tPolicy
@@ -49,6 +50,19 @@ class ServerConfig:
     use_sim_policy_wrapper: bool = False
     """Whether to use the sim policy wrapper"""
 
+    use_real_robot_wrapper: bool = False
+    """Whether to use the real robot policy wrapper (handles serialized JPEG video decoding
+    and flat-to-nested observation transformation for real robot deployment)"""
+
+    num_inference_timesteps: int | None = None
+    """Override number of denoising steps (None uses model default)"""
+
+    use_torch_compile: bool = False
+    """Whether to torch.compile the action head for faster steady-state inference"""
+
+    torch_compile_mode: Literal["default", "reduce-overhead", "max-autotune"] = "reduce-overhead"
+    """torch.compile mode"""
+
 
 def main(config: ServerConfig):
     print("Starting GR00T inference server...")
@@ -57,10 +71,13 @@ def main(config: ServerConfig):
     print(f"  Device: {config.device}")
     print(f"  Host: {config.host}")
     print(f"  Port: {config.port}")
+    print(f"  num_inference_timesteps: {config.num_inference_timesteps}")
+    print(f"  use_torch_compile: {config.use_torch_compile}")
 
     # check if the model path exists
-    if config.model_path.startswith("/") and not os.path.exists(config.model_path):
-        raise FileNotFoundError(f"Model path {config.model_path} does not exist")
+    if config.model_path is not None and config.model_path.startswith("/"):
+        if not os.path.exists(config.model_path):
+            raise FileNotFoundError(f"Model path {config.model_path} does not exist")
 
     # Create and start the server
     if config.model_path is not None:
@@ -69,6 +86,9 @@ def main(config: ServerConfig):
             model_path=config.model_path,
             device=config.device,
             strict=config.strict,
+            num_inference_timesteps=config.num_inference_timesteps,
+            use_torch_compile=config.use_torch_compile,
+            torch_compile_mode=config.torch_compile_mode,
         )
     elif config.dataset_path is not None:
         if config.modality_config_path is None:
@@ -87,11 +107,14 @@ def main(config: ServerConfig):
     else:
         raise ValueError("Either model_path or dataset_path must be provided")
 
-    # Apply sim policy wrapper if needed
     if config.use_sim_policy_wrapper:
         from gr00t.policy.gr00t_policy import Gr00tSimPolicyWrapper
 
         policy = Gr00tSimPolicyWrapper(policy)
+    elif config.use_real_robot_wrapper:
+        from gr00t.policy.gr00t_policy import Gr00tRealRobotPolicyWrapper
+
+        policy = Gr00tRealRobotPolicyWrapper(policy)
 
     server = PolicyServer(
         policy=policy,

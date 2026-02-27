@@ -300,6 +300,61 @@ MODALITY_CONFIGS = {
             modality_keys=["annotation.human.coarse_action"],
         ),
     },
+    "xdof": {
+        "video": ModalityConfig(
+            delta_indices=[0],
+            modality_keys=[
+                "left_camera-images-rgb_320_240",
+                "top_camera-images-rgb_320_240",
+                "right_camera-images-rgb_320_240",
+            ],
+        ),
+        "state": ModalityConfig(
+            delta_indices=[0],
+            modality_keys=[
+                "gripper_pos_obs_left",
+                "gripper_pos_obs_right",
+                "joint_pos_obs_left",
+                "joint_pos_obs_right",
+            ],
+        ),
+        "action": ModalityConfig(
+            delta_indices=list(range(0, 50)),
+            modality_keys=[
+                "gripper_pos_action_left",
+                "gripper_pos_action_right",
+                "joint_pos_action_left",
+                "joint_pos_action_right",
+            ],
+            action_configs=[
+                ActionConfig(
+                    rep=ActionRepresentation.ABSOLUTE,
+                    type=ActionType.NON_EEF,
+                    format=ActionFormat.DEFAULT,
+                    state_key="gripper_pos_obs_left",
+                ),
+                ActionConfig(
+                    rep=ActionRepresentation.ABSOLUTE,
+                    type=ActionType.NON_EEF,
+                    format=ActionFormat.DEFAULT,
+                    state_key="gripper_pos_obs_right",
+                ),
+                ActionConfig(
+                    rep=ActionRepresentation.RELATIVE,
+                    type=ActionType.NON_EEF,
+                    format=ActionFormat.DEFAULT,
+                    state_key="joint_pos_obs_left",
+                ),
+                ActionConfig(
+                    rep=ActionRepresentation.RELATIVE,
+                    type=ActionType.NON_EEF,
+                    format=ActionFormat.DEFAULT,
+                    state_key="joint_pos_obs_right",
+                ),
+            ],
+        ),
+        "language": ModalityConfig(delta_indices=[0], modality_keys=["annotation.task"]),
+    },
     "oxe_droid": {
         "video": ModalityConfig(
             delta_indices=[0],

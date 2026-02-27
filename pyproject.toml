@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gr00t"
 version = "0.1.0"
-requires-python = "==3.10.*"
+requires-python = ">=3.10"
 # Mirror the main repo's baseline dependencies so install behaves the same.
 dependencies = [
     "albumentations==1.4.18",
@@ -17,6 +17,8 @@ dependencies = [
     "lmdb==1.7.5",
     "msgpack==1.1.0",
     "msgpack-numpy==0.4.8",
+    "ninja",
+    "opencv-python>=4.8.0",
     "pandas==2.2.3",
     "peft==0.17.1",
     "termcolor==3.2.0",
@@ -24,19 +26,19 @@ dependencies = [
     "torchvision==0.22.1",
     "transformers==4.51.3",
     "tyro==0.9.17",
-    "flash-attn==2.7.4.post1",
+    "flash-attn==2.8.0.post2",
+    "xformers==0.0.31.post1",
     "click==8.1.8",
     "datasets==3.6.0",
     "einops==0.8.1",
     "gymnasium==1.2.2",
     "matplotlib==3.10.1",
-    "numpy==1.26.4",
+    "numpy>=2.0.0",
     "omegaconf==2.3.0",
     "scipy==1.15.3",
-    "torchcodec==0.4.0",
+    "torchcodec>=0.5,<0.6",
     "wandb==0.23.0",
     "pyzmq==27.0.1",
-    "deepspeed==0.17.6",
 ]
 
 [project.optional-dependencies]
@@ -46,15 +48,33 @@ dev = [
 ]
 tensorrt = [
     "onnx>=1.20.0",
-    "tensorrt>=10.14.1.48.post1",
+    "tensorrt-cu12==10.14.1.48.post1",
+]
+training = [
+    "deepspeed==0.17.6",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["gr00t*"]
 
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+torchcodec = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.python.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.extra-build-dependencies]
-flash-attn = ["torch==2.7.0", "numpy==1.26.4"]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
 
 [tool.ruff]
 line-length = 100
