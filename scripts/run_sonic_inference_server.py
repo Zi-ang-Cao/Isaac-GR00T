@@ -1,52 +1,115 @@
 #!/usr/bin/env python3
-#!/usr/bin/env -S python -u
 """GR00T N1.5 inference server for SONIC (Unitree G1 latent actions).
 
-This script loads a converted SONIC checkpoint using the public GR00T N1.5
-codebase and exposes a ZMQ inference server with the same two-step API used
-by the internal groot_dc_main policy server:
-
-    set_observation(obs)   ->  stores + decodes observation
-    get_action(time=None)  ->  runs inference on stored observation
+Wire-compatible with the internal groot_dc_main GrootN1ClientPolicy client:
+uses the same TorchSerializer (torch.save/load over ZMQ) and the same
+two-step API (set_observation -> get_action).
 
 Usage::
 
-    # Convert the internal checkpoint first (one-time):
+    # Prepare the checkpoint (one-time, non-destructive):
     python scripts/convert_sonic_checkpoint.py \\
-        --input-dir /path/to/internal/checkpoint-20000 \\
-        --output-dir /path/to/converted/checkpoint
+        --input-dir /path/to/internal/checkpoint-20000 --prepare
 
     # Run the server:
     CUDA_VISIBLE_DEVICES=0 python scripts/run_sonic_inference_server.py \\
-        --model-path /path/to/converted/checkpoint \\
+        --model-path /path/to/internal/checkpoint-20000 \\
         --port 6666
-
-Downstream clients connect with ZMQ and call::
-
-    client.set_observation({
-        "video.ego_view": [jpeg_bytes, ...],       # (T,) list of JPEG bytes
-        "state.left_leg": np.ndarray,               # (T, D) or (B, T, D)
-        "state.right_leg": np.ndarray,
-        ...
-        "annotation.human.task_description": "pick up the can",
-    })
-    action = client.get_action()
-    # action = {"action.motion_token": np.ndarray, ...}
 """
 
 import time as tm
-from dataclasses import dataclass
-from typing import Any, Dict, Literal
+import traceback
+from dataclasses import dataclass, field
+from io import BytesIO
+from typing import Any, Callable, Dict, Literal
 
 import cv2
 import numpy as np
+import torch
 import tyro
+import zmq
 
 from gr00t.data.embodiment_tags import EMBODIMENT_TAG_MAPPING
-from gr00t.eval.service import BaseInferenceServer
 from gr00t.experiment.data_config import load_data_config
 from gr00t.model.policy import Gr00tPolicy
 
+
+# ---------------------------------------------------------------------------
+# TorchSerializer -- identical to groot_dc_main/groot/control/utils/service.py
+# This is what the internal GrootN1ClientPolicy speaks.
+# ---------------------------------------------------------------------------
+
+class TorchSerializer:
+    @staticmethod
+    def to_bytes(data: dict) -> bytes:
+        buf = BytesIO()
+        torch.save(data, buf)
+        return buf.getvalue()
+
+    @staticmethod
+    def from_bytes(data: bytes) -> dict:
+        return torch.load(BytesIO(data), weights_only=False)
+
+
+# ---------------------------------------------------------------------------
+# Minimal ZMQ server using TorchSerializer (matches the internal protocol)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _EndpointHandler:
+    handler: Callable
+    requires_input: bool = True
+
+
+class TorchZmqServer:
+    """ZMQ REP server using TorchSerializer, matching the internal protocol."""
+
+    def __init__(self, host: str = "*", port: int = 5555):
+        self.running = True
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.REP)
+        self.socket.bind(f"tcp://{host}:{port}")
+        self._endpoints: dict[str, _EndpointHandler] = {}
+        self.register_endpoint("ping", self._handle_ping, requires_input=False)
+        self.register_endpoint("kill", self._kill_server, requires_input=False)
+
+    def _kill_server(self):
+        self.running = False
+
+    def _handle_ping(self) -> dict:
+        return {"status": "ok", "message": "Server is running"}
+
+    def register_endpoint(self, name: str, handler: Callable, requires_input: bool = True):
+        self._endpoints[name] = _EndpointHandler(handler, requires_input)
+
+    def run(self):
+        addr = self.socket.getsockopt_string(zmq.LAST_ENDPOINT)
+        print(f"Server is ready and listening on {addr}")
+        while self.running:
+            try:
+                message = self.socket.recv()
+                request = TorchSerializer.from_bytes(message)
+                endpoint = request.get("endpoint", "get_action")
+
+                if endpoint not in self._endpoints:
+                    raise ValueError(f"Unknown endpoint: {endpoint}")
+
+                handler = self._endpoints[endpoint]
+                result = (
+                    handler.handler(request.get("data", {}))
+                    if handler.requires_input
+                    else handler.handler()
+                )
+                self.socket.send(TorchSerializer.to_bytes(result))
+            except Exception as e:
+                print(f"Error in server: {e}")
+                traceback.print_exc()
+                self.socket.send(b"ERROR")
+
+
+# ---------------------------------------------------------------------------
+# Video decoding helpers
+# ---------------------------------------------------------------------------
 
 def _check_video_is_batched(video: np.ndarray) -> bool:
     if len(video) == 0:
@@ -78,19 +141,35 @@ def _decode_video(video_array: np.ndarray) -> np.ndarray:
         ])
 
 
-class SonicInferenceServer(BaseInferenceServer):
-    """ZMQ server with backward-compatible set_observation + get_action API."""
+# ---------------------------------------------------------------------------
+# SONIC inference server
+# ---------------------------------------------------------------------------
+
+class SonicInferenceServer(TorchZmqServer):
+    """ZMQ server with backward-compatible set_observation + get_action API.
+
+    Uses TorchSerializer so the internal GrootN1ClientPolicy can connect
+    without any client-side changes.
+    """
 
     def __init__(
         self,
         policy: Gr00tPolicy,
         host: str = "*",
         port: int = 6666,
+        video_keys: list[str] | None = None,
+        state_keys: list[str] | None = None,
+        language_keys: list[str] | None = None,
     ):
         super().__init__(host=host, port=port)
         self.policy = policy
         self.observation = None
         self._time_start = tm.time()
+
+        self._video_keys = set(video_keys or [])
+        self._state_keys = set(state_keys or [])
+        self._language_keys = set(language_keys or [])
+        self._accepted_keys = self._video_keys | self._state_keys | self._language_keys
 
         self.register_endpoint("set_observation", self.set_observation, requires_input=True)
         self.register_endpoint("get_action", self.get_action, requires_input=True)
@@ -99,22 +178,36 @@ class SonicInferenceServer(BaseInferenceServer):
         )
 
     def set_observation(self, observation: Dict[str, Any]):
-        """Decode and store observation for the next get_action call."""
+        """Decode, filter, and store observation for the next get_action call.
+
+        The internal client sends extra keys (e.g. "q") and annotation as a
+        bare string.  We filter to only the keys the data config expects and
+        wrap language values in a list so the transform pipeline can batch them.
+        """
         self._time_start = tm.time()
         if observation is None:
             self.observation = None
             return
 
+        clean_obs: Dict[str, Any] = {}
         for key, value in observation.items():
-            if "video" in key:
+            if self._accepted_keys and key not in self._accepted_keys:
+                continue
+
+            if key in self._video_keys:
                 video_array = np.array(value) if not isinstance(value, np.ndarray) else value
-                observation[key] = _decode_video(video_array)
-            elif key.startswith("annotation.") or key.startswith("language."):
-                observation[key] = value
+                clean_obs[key] = _decode_video(video_array)
+            elif key in self._language_keys:
+                if isinstance(value, str):
+                    clean_obs[key] = [value]
+                else:
+                    clean_obs[key] = value
+            else:
+                clean_obs[key] = value
 
-        self.observation = observation
+        self.observation = clean_obs
 
-    def get_action(self, time: float | None = None) -> Dict[str, Any]:
+    def get_action(self, data: dict | None = None) -> Dict[str, Any]:
         """Run inference on stored observation and return actions."""
         assert self.observation is not None, (
             "Observation not set -- call set_observation first"
@@ -130,10 +223,14 @@ class SonicInferenceServer(BaseInferenceServer):
         return self.policy.get_modality_config()
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 @dataclass
 class ServerConfig:
     model_path: str = ""
-    """Path to the converted SONIC checkpoint directory."""
+    """Path to the SONIC checkpoint directory (run --prepare first)."""
 
     port: int = 6666
     """Server port number."""
@@ -168,6 +265,7 @@ def main(config: ServerConfig):
     print(f"  Data cfg:   {config.data_config}")
     print(f"  Port:       {config.port}")
     print(f"  Denoise:    {config.denoising_steps} steps")
+    print(f"  Serializer: TorchSerializer (internal-client compatible)")
     print("=" * 70)
 
     data_cfg = load_data_config(config.data_config)
@@ -183,10 +281,16 @@ def main(config: ServerConfig):
         device=config.device,
     )
 
-    server = SonicInferenceServer(policy, host=config.host, port=config.port)
+    server = SonicInferenceServer(
+        policy,
+        host=config.host,
+        port=config.port,
+        video_keys=data_cfg.video_keys,
+        state_keys=data_cfg.state_keys,
+        language_keys=data_cfg.language_keys,
+    )
 
-    print(f"\nServer ready on tcp://{config.host}:{config.port}")
-    print("Endpoints: set_observation, get_action, get_modality_config, ping, kill")
+    print(f"\nEndpoints: set_observation, get_action, get_modality_config, ping, kill")
     print("Press Ctrl+C to stop.\n")
 
     try:

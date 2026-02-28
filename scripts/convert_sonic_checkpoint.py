@@ -91,6 +91,7 @@ def convert_config(input_config: dict) -> dict:
 def convert_statistics_to_metadata(
     stats_path: Path,
     embodiment_tag: str = "unitree_g1_whole_body_teleop_latent",
+    video_resolution: tuple[int, int] = (640, 480),
 ) -> dict:
     """Convert internal dataset_statistics.json to public metadata.json format."""
     with open(stats_path) as f:
@@ -122,7 +123,7 @@ def convert_statistics_to_metadata(
 
     video_modalities = {
         "ego_view": {
-            "resolution": (224, 224),
+            "resolution": list(video_resolution),
             "channels": 3,
             "fps": 50.0,
         }
@@ -141,20 +142,26 @@ def convert_statistics_to_metadata(
     }
 
 
-def _create_metadata(target_dir: Path, stats_path: Path, embodiment_tag: str):
+def _create_metadata(
+    target_dir: Path,
+    stats_path: Path,
+    embodiment_tag: str,
+    video_resolution: tuple[int, int] = (640, 480),
+):
     """Write experiment_cfg/metadata.json from dataset_statistics.json."""
     exp_cfg_dir = target_dir / "experiment_cfg"
     exp_cfg_dir.mkdir(exist_ok=True)
     if stats_path.exists():
-        metadata = convert_statistics_to_metadata(stats_path, embodiment_tag)
+        metadata = convert_statistics_to_metadata(stats_path, embodiment_tag, video_resolution)
         with open(exp_cfg_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
         print(f"  Created experiment_cfg/metadata.json for '{embodiment_tag}'")
+        print(f"    video resolution: {video_resolution[0]}x{video_resolution[1]}")
     else:
         print(f"  WARNING: {stats_path} not found, skipping metadata generation")
 
 
-def prepare_in_place(input_dir: Path, embodiment_tag: str):
+def prepare_in_place(input_dir: Path, embodiment_tag: str, video_resolution: tuple[int, int]):
     """Non-destructive: write config_public.json + metadata.json, never touch config.json."""
     print(f"Preparing checkpoint (non-destructive): {input_dir}")
 
@@ -170,12 +177,12 @@ def prepare_in_place(input_dir: Path, embodiment_tag: str):
     print(f"    action_dim={converted['action_dim']}  action_horizon={converted['action_horizon']}")
 
     stats_path = input_dir / "experiment_cfg" / "dataset_statistics.json"
-    _create_metadata(input_dir, stats_path, embodiment_tag)
+    _create_metadata(input_dir, stats_path, embodiment_tag, video_resolution)
 
     print(f"\nDone. config.json is untouched -- checkpoint is loadable by both repos.")
 
 
-def copy_to_output(input_dir: Path, output_dir: Path, embodiment_tag: str):
+def copy_to_output(input_dir: Path, output_dir: Path, embodiment_tag: str, video_resolution: tuple[int, int]):
     """Full copy: write converted config.json + weights to output_dir."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,7 +205,7 @@ def copy_to_output(input_dir: Path, output_dir: Path, embodiment_tag: str):
         print(f"  {index_file.name}")
 
     stats_path = input_dir / "experiment_cfg" / "dataset_statistics.json"
-    _create_metadata(output_dir, stats_path, embodiment_tag)
+    _create_metadata(output_dir, stats_path, embodiment_tag, video_resolution)
 
     for extra in ["experiment_cfg/conf.yaml", "experiment_cfg/dataset_statistics.json"]:
         src = input_dir / extra
@@ -233,14 +240,24 @@ def main():
         type=str,
         default="unitree_g1_whole_body_teleop_latent",
     )
+    parser.add_argument(
+        "--video-resolution",
+        type=int,
+        nargs=2,
+        default=[640, 480],
+        metavar=("W", "H"),
+        help="Native camera resolution (width height). Default: 640 480",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
 
+    video_res = tuple(args.video_resolution)
+
     if args.prepare:
-        prepare_in_place(input_dir, args.embodiment_tag)
+        prepare_in_place(input_dir, args.embodiment_tag, video_res)
     else:
-        copy_to_output(input_dir, Path(args.output_dir), args.embodiment_tag)
+        copy_to_output(input_dir, Path(args.output_dir), args.embodiment_tag, video_res)
 
 
 if __name__ == "__main__":
