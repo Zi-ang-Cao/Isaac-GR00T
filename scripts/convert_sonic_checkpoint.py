@@ -71,6 +71,7 @@ def convert_config(input_config: dict) -> dict:
         "tune_projector": input_config.get("tune_projector", True),
         "tune_diffusion_model": input_config.get("tune_diffusion_model", True),
         "use_vlln": input_config.get("use_vlln", True),
+        "use_future_tokens": input_config.get("use_future_tokens", False),
         "vl_self_attention_cfg": input_config.get("vl_self_attention_cfg", {}),
         "max_state_dim": input_config.get("max_state_dim", 64),
     }
